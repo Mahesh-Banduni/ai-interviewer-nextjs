@@ -1,0 +1,145 @@
+import { NextResponse } from "next/server";
+import prisma from "../../../lib/prisma";
+
+export async function POST(req) {
+    try {
+        const candidatesCount = await prisma.candidate.count();
+        const interviewsCount = await prisma.interview.count();
+    
+        const completedInterviews = await prisma.interview.findMany({
+            where: { status: 'COMPLETED' },
+            select: {
+                completionMin: true,
+                durationMin: true,
+            }
+        });
+
+        const now = new Date();
+        const sevenDaysAgo = new Date();
+        sevenDaysAgo.setDate(now.getDate() - 7);
+            
+        const thisWeekCandidateCount = await prisma.candidate.count({
+          where: {
+            createdAt: {
+              gte: sevenDaysAgo,
+              lte: now,
+            },
+          },
+        });
+
+        const thisWeekInterviewCount = await prisma.interview.count({
+          where: {
+            createdAt: {
+              gte: sevenDaysAgo,
+              lte: now,
+            },
+          },
+        });
+
+        // Total completed interview minutes (actual time)
+        const totalCompletionMins = completedInterviews.reduce(
+            (sum, i) => sum + (i.completionMin || 0),
+            0
+        );
+    
+        // Total planned interview durations
+        const totalScheduledMins = completedInterviews.reduce(
+            (sum, i) => sum + (i.durationMin || 0),
+            0
+        );
+    
+        // Average actual duration
+        const avgCompletionMins =
+            completedInterviews.length > 0
+                ? (totalCompletionMins / completedInterviews.length).toFixed(2)
+                : 0;
+    
+        // Average planned duration
+        const avgScheduledMins =
+            completedInterviews.length > 0
+                ? (totalScheduledMins / completedInterviews.length).toFixed(2)
+                : 0;
+    
+        // Completion rate = actual / scheduled
+        const completionRate =
+            totalScheduledMins > 0
+                ? ((totalCompletionMins / totalScheduledMins) * 100).toFixed(1)
+                : "0";
+
+        const startOfMonth = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
+        const endOfMonth = new Date(new Date().getFullYear(), new Date().getMonth() + 1, 1);
+        
+        const results = await prisma.resumeProfile.groupBy({
+          by: ["jobAreaId"],
+          where: {
+            createdAt: {
+              gte: startOfMonth,
+              lt: endOfMonth
+            }
+          },
+          _count: {
+            jobAreaId: true
+          },
+          orderBy: {
+            _count: {
+              jobAreaId: "desc"
+            }
+          },
+          take: 5
+        });
+        // console.log('Results',results);
+    
+        const populated = await Promise.all(
+          results.map(async (area) => {
+            const jobArea = await prisma.jobAreas.findUnique({
+              where: { jobAreaId: area.jobAreaId || "" }
+            });
+
+            const interviewCount = await prisma.interview.count({
+                where:{
+                    createdAt: {
+                      gte: startOfMonth,
+                      lt: endOfMonth
+                    },
+                    candidate:{
+                        resumeProfile:{
+                            jobAreaId: jobArea?.jobAreaId
+                        }
+                    }
+                }
+            })
+        
+            return {
+              jobAreaId: area.jobAreaId,
+              name: jobArea?.name || "Unknown",
+              count: interviewCount
+            };
+          })
+        );
+
+        const interviewCount = await prisma.interview.count({
+          where: {
+            createdAt: {
+              gte: startOfMonth,
+              lt: endOfMonth
+            }
+          }
+        });
+    
+        return NextResponse.json({
+            candidatesCount,
+            thisWeekCandidateCount,
+            interviewsCount,
+            thisWeekInterviewCount,
+            completionRate: Number(completionRate),
+            avgCompletionMins,
+            avgScheduledMins,
+            topJobAreas: populated,
+            totalInterviewsThisMonth: interviewCount
+        },{status: 200});
+    }
+    catch(err){
+        console.log("Error in retrieving details:", err);
+        return NextResponse.json({ error: "Error processing request" }, { status: 500 });
+    }
+}
